@@ -31,7 +31,11 @@ The session lives in the SQLite file given by `-db`. Delete it to unlink.
 
 `pair` keeps running after the scan, because the phone only finishes logging in once the new device has received its initial sync. Stop it with Ctrl+C after your phone lists the device under Linked devices, then start `run` (or your service).
 
-Without a session, or after WhatsApp unlinks the device, MicDrop exits with status 3. Configure your service manager not to restart on that status, since only pairing again fixes it.
+Exit statuses for service managers:
+
+- **3:** no session, or WhatsApp unlinked the device. Only pairing again fixes it, so don't restart.
+- **4:** WhatsApp refused the connection: client outdated, temporary ban, another client took over the session, or an unknown connect failure. An immediate restart would most likely be refused again, so retry rarely (e.g. daily) or after updating.
+- **1:** anything else, such as no network at startup. Restart after a short delay.
 
 ## Running as a Linux service
 
@@ -50,11 +54,13 @@ WorkingDirectory=/var/lib/micdrop
 ExecStart=/usr/local/bin/micdrop run
 Restart=always
 RestartSec=30
-RestartPreventExitStatus=3
+RestartPreventExitStatus=3 4
 
 [Install]
 WantedBy=multi-user.target
 ```
+
+systemd doesn't restart on status 4 then, so retry it from a daily timer, for example one that installs the latest release and runs `systemctl is-failed -q micdrop && systemctl restart micdrop`.
 
 Pair as that user, then enable the service:
 
@@ -66,4 +72,4 @@ sudo systemctl enable --now micdrop
 
 ## Updating
 
-WhatsApp eventually rejects outdated client versions. Update to the latest release, or rebuild after `go get -u go.mau.fi/whatsmeow && go mod tidy`.
+WhatsApp eventually rejects outdated client versions. A weekly workflow updates whatsmeow and, when anything changed, publishes a new patch release, so installing the latest release regularly (e.g. from a daily timer) keeps MicDrop working. To build an update yourself: `go get -u go.mau.fi/whatsmeow && go mod tidy && go build .`

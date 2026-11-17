@@ -1,8 +1,14 @@
 name: Release
 
+# Releases on every pushed v* tag. Weekly (and on demand) it also updates whatsmeow, and when that changes anything it
+# commits the update, tags the next patch version and releases it, since WhatsApp rejects outdated clients.
+
 on:
   push:
     tags: ["v*"]
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -12,10 +18,32 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: Use pushed tag
+        if: github.event_name == 'push'
+        run: echo "TAG=$GITHUB_REF_NAME" >> "$GITHUB_ENV"
+      - name: Update whatsmeow
+        if: github.event_name != 'push'
+        run: |
+          go get -u go.mau.fi/whatsmeow
+          go mod tidy
+          if git diff --quiet; then echo "whatsmeow is up to date"; exit 0; fi
+          go vet ./...
+          latest=$(git describe --tags --abbrev=0 --match 'v*')
+          IFS=. read -r major minor patch <<< "${latest#v}"
+          tag="v$major.$minor.$((patch + 1))"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "Update whatsmeow"
+          git tag "$tag"
+          git push origin HEAD:refs/heads/master "$tag"
+          echo "TAG=$tag" >> "$GITHUB_ENV"
       - name: Build
+        if: env.TAG != ''
         env:
           CGO_ENABLED: "0"
         run: |
@@ -27,6 +55,7 @@ jobs:
           done
           cd dist && sha256sum * > SHA256SUMS
       - name: Publish
+        if: env.TAG != ''
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --title "MicDrop $GITHUB_REF_NAME" --generate-notes
+        run: gh release create "$TAG" dist/* --title "MicDrop $TAG" --generate-notes

@@ -41,9 +41,17 @@ const (
 	// Exit code for a missing or unlinked session. Restarting can't fix it, so service managers shouldn't retry
 	// (systemd: RestartPreventExitStatus=3).
 	exitNotPaired = 3
+
+	// Exit code when WhatsApp refuses the connection in a way the client won't retry by itself: outdated client,
+	// temporary ban, another client taking over the session, or an unknown connect failure. An immediate restart
+	// would most likely be refused again, so retry rarely (e.g. daily) or after updating.
+	exitConnectRefused = 4
 )
 
-var errNotPaired = errors.New("not paired; link the account with `micdrop pair`")
+var (
+	errNotPaired      = errors.New("not paired; link the account with `micdrop pair`")
+	errConnectRefused = errors.New("connection refused by WhatsApp")
+)
 
 func main() {
 	dbPath := flag.String("db", "micdrop.db", "SQLite file holding the WhatsApp session")
@@ -56,10 +64,14 @@ func main() {
 	log := waLog.Stdout("MicDrop", *logLevel, false)
 	if err := run(ctx, log, *dbPath, flag.Args()); err != nil {
 		log.Errorf("%v", err)
-		if errors.Is(err, errNotPaired) {
+		switch {
+		case errors.Is(err, errNotPaired):
 			os.Exit(exitNotPaired)
+		case errors.Is(err, errConnectRefused):
+			os.Exit(exitConnectRefused)
+		default:
+			os.Exit(1)
 		}
-		os.Exit(1)
 	}
 }
 
@@ -141,7 +153,13 @@ func pair(ctx context.Context, client *whatsmeow.Client, phone string) error {
 }
 
 func serve(ctx context.Context, log waLog.Logger, client *whatsmeow.Client, pairFirst bool, phone string) error {
-	loggedOut := make(chan struct{}, 1)
+	fatal := make(chan error, 1)
+	stopWith := func(err error) {
+		select {
+		case fatal <- err:
+		default: // the first fatal event wins
+		}
+	}
 	client.AddEventHandler(func(rawEvt any) {
 		switch evt := rawEvt.(type) {
 		case *events.Message:
@@ -171,7 +189,15 @@ func serve(ctx context.Context, log waLog.Logger, client *whatsmeow.Client, pair
 		case *events.Connected:
 			log.Infof("Connected as %s", client.Store.ID)
 		case *events.LoggedOut:
-			loggedOut <- struct{}{}
+			stopWith(fmt.Errorf("logged out by WhatsApp (device unlinked): %w", errNotPaired))
+		case *events.ClientOutdated:
+			stopWith(fmt.Errorf("%w: client outdated, update MicDrop", errConnectRefused))
+		case *events.TemporaryBan:
+			stopWith(fmt.Errorf("%w: %v", errConnectRefused, evt))
+		case *events.StreamReplaced:
+			stopWith(fmt.Errorf("%w: another client took over this session", errConnectRefused))
+		case *events.ConnectFailure:
+			stopWith(fmt.Errorf("%w: connect failure %d %s", errConnectRefused, int(evt.Reason), evt.Message))
 		}
 	})
 
@@ -188,7 +214,7 @@ func serve(ctx context.Context, log waLog.Logger, client *whatsmeow.Client, pair
 	case <-ctx.Done():
 		log.Infof("Shutting down")
 		return nil
-	case <-loggedOut:
-		return fmt.Errorf("logged out by WhatsApp (device unlinked): %w", errNotPaired)
+	case err := <-fatal:
+		return err
 	}
 }
